@@ -824,6 +824,42 @@ const App: React.FC = () => {
     showToast(`تم حفظ الجلسة. ${logNotes.join(' | ')}`);
   };
 
+  const syncCustomerBalance = (phone: string | undefined, debtBalance: number, creditDelta: number, name?: string) => {
+      if (!phone) return;
+
+      setCustomers(prev => {
+          const existing = prev.find(c => c.phone === phone);
+
+          if (existing) {
+              const nextCredit = Math.max(0, (existing.creditBalance || 0) + creditDelta);
+              const nextDebt = Math.max(0, debtBalance);
+              return prev.map(c => c.phone === phone ? {
+                  ...c,
+                  debtBalance: nextDebt,
+                  creditBalance: nextCredit,
+                  isVIP: c.isVIP || nextDebt > 0 || nextCredit > 0
+              } : c);
+          }
+
+          const initialDebt = Math.max(0, debtBalance);
+          const initialCredit = Math.max(0, creditDelta);
+
+          if (initialDebt === 0 && initialCredit === 0) return prev;
+
+          const now = new Date().toISOString();
+          return [...prev, {
+              id: generateId(),
+              name: name || phone,
+              phone,
+              isVIP: true,
+              creditBalance: initialCredit,
+              debtBalance: initialDebt,
+              createdAt: now,
+              lastVisit: now
+          }];
+      });
+  };
+
   const handleRepayDebt = (recordId: string, amount: number, type: 'cash'|'bank', details?: any) => {
       try {
           validateOperation(getLocalDate(), periodLock);
@@ -845,20 +881,23 @@ const App: React.FC = () => {
 
           setRecords(prev => prev.map(r => {
               if (r.id !== recordId) return r;
-              const newTx: Transaction = { id: generateId(), date: new Date().toISOString(), amount, type, ...details, note: 'سداد دين' };
-              const newPaid = (r.paidTotal || 0) + amount;
-              const newRemaining = Math.max(0, r.totalInvoice - newPaid);
-              const cust = customers.find(c => c.phone === r.customerPhone);
-              if (cust) {
-                  setCustomers(curr => curr.map(c => c.id === cust.id ? { ...c, debtBalance: Math.max(0, c.debtBalance - amount) } : c));
-              }
-              logAction('session', recordId, 'debt_repayment', `سداد دين بقيمة ${amount} (${type})`);
-              return { 
-                  ...r, 
-                  transactions: [...(r.transactions||[]), newTx], 
-                  paidTotal: newPaid, 
-                  remainingDebt: newRemaining, 
-                  isPaid: newRemaining < 0.5,
+              const newPaidTotal = (r.paidTotal || 0) + amount;
+              const overpayCredit = Math.max(0, newPaidTotal - r.totalInvoice);
+              const remainingDebt = overpayCredit > 0 ? 0 : Math.max(r.totalInvoice - newPaidTotal, 0);
+
+              const newTx: Transaction = { id: generateId(), date: new Date().toISOString(), amount, type, ...details, note: overpayCredit > 0 ? 'سداد فاتورة مع رصيد زائد' : 'سداد فاتورة' };
+
+              syncCustomerBalance(r.customerPhone, remainingDebt, overpayCredit, r.customerName);
+              logAction('session', recordId, 'debt_repayment', `سداد فاتورة بقيمة ${amount} (${type})`);
+
+              return {
+                  ...r,
+                  transactions: [...(r.transactions||[]), newTx],
+                  paidTotal: newPaidTotal,
+                  remainingDebt,
+                  createdCredit: (r.createdCredit || 0) + overpayCredit,
+                  isPaid: remainingDebt < 0.5,
+                  paymentStatus: remainingDebt < 0.5 ? 'paid' : 'customer_debt',
                   cashPaid: type==='cash' ? r.cashPaid + amount : r.cashPaid,
                   bankPaid: type==='bank' ? r.bankPaid + amount : r.bankPaid
               };
@@ -947,14 +986,20 @@ const App: React.FC = () => {
       
       logAction('session', orderData.target.id, orderData.orderIdToEdit ? 'edit_order' : 'add_order', `${orderData.orderIdToEdit ? 'تعديل' : 'إضافة'} طلب: ${name} (${qty})`);
 
-      if('durationMinutes' in orderData.target) {
-          setRecords(prev => prev.map(r => {
-              if(r.id!==orderData.target!.id) return r;
-              const ords = orderData.orderIdToEdit ? r.orders.map(o=>o.id===orderData.orderIdToEdit?newOrder:o) : [...r.orders, newOrder];
-              const fins = calcRecordFinancials(r as any, r.endTime, pricingConfig, ords, r.discountApplied);
-              return { ...r, ...fins, orders: ords, totalInvoice: fins.totalInvoice||0, remainingDebt: Math.max(0, (fins.totalInvoice||0) - r.paidTotal) };
-          }));
-      } else {
+    if('durationMinutes' in orderData.target) {
+        setRecords(prev => prev.map(r => {
+            if(r.id!==orderData.target!.id) return r;
+            const ords = orderData.orderIdToEdit ? r.orders.map(o=>o.id===orderData.orderIdToEdit?newOrder:o) : [...r.orders, newOrder];
+            const fins = calcRecordFinancials(r as any, r.endTime, pricingConfig, ords, r.discountApplied);
+            const newTotal = fins.totalInvoice || 0;
+            const newRemaining = Math.max(0, newTotal - r.paidTotal);
+            const creditDelta = Math.max(0, r.paidTotal - newTotal);
+
+            syncCustomerBalance(r.customerPhone, newRemaining, creditDelta, r.customerName);
+
+            return { ...r, ...fins, orders: ords, totalInvoice: newTotal, remainingDebt: newRemaining, createdCredit: (r.createdCredit || 0) + creditDelta, paymentStatus: newRemaining < 0.5 ? 'paid' : 'customer_debt', isPaid: newRemaining < 0.5 };
+        }));
+    } else {
           setSessions(prev => prev.map(s => s.id===orderData.target!.id ? { ...s, orders: orderData.orderIdToEdit ? s.orders.map(o=>o.id===orderData.orderIdToEdit?newOrder:o) : [...s.orders, newOrder] } : s));
       }
       setModals(m=>({...m, addOrder:false})); showToast('تم حفظ الطلب');
@@ -973,24 +1018,29 @@ const App: React.FC = () => {
     const isRecord = 'durationMinutes' in target;
     logAction('session', target.id, 'delete_order', `حذف طلب ${orderId}`);
     
-    if (isRecord) {
-        const record = target as Record;
-        setRecords(prev => prev.map(r => {
-            if (r.id !== record.id) return r;
-            const updatedOrders = r.orders.filter(o => o.id !== orderId);
-            const financials = calcRecordFinancials(r as any, r.endTime, pricingConfig, updatedOrders, r.discountApplied);
-            const newTotal = financials.totalInvoice || 0;
-            const newRemaining = newTotal - r.paidTotal;
+      if (isRecord) {
+          const record = target as Record;
+          setRecords(prev => prev.map(r => {
+                if (r.id !== record.id) return r;
+                const updatedOrders = r.orders.filter(o => o.id !== orderId);
+                const financials = calcRecordFinancials(r as any, r.endTime, pricingConfig, updatedOrders, r.discountApplied);
+                const newTotal = financials.totalInvoice || 0;
+                const newRemaining = Math.max(0, newTotal - r.paidTotal);
+                const creditDelta = Math.max(0, r.paidTotal - newTotal);
+
+                syncCustomerBalance(r.customerPhone, newRemaining, creditDelta, r.customerName);
             return {
                 ...r,
-                ...financials, 
+                ...financials,
                 orders: updatedOrders,
                 totalInvoice: newTotal,
                 remainingDebt: newRemaining,
-                isPaid: newRemaining <= 0.5 
+                createdCredit: (r.createdCredit || 0) + creditDelta,
+                paymentStatus: newRemaining < 0.5 ? 'paid' : 'customer_debt',
+                isPaid: newRemaining <= 0.5
             };
-        }));
-        showToast('تم حذف الطلب وتحديث السجل');
+          }));
+          showToast('تم حذف الطلب وتحديث السجل');
     } else {
         setSessions(prev => prev.map(s => {
             if (s.id !== target.id) return s;
