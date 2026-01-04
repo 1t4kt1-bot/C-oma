@@ -804,8 +804,8 @@ const App: React.FC = () => {
         senderPhone: checkoutData.senderPhone,
         senderAccountName: checkoutData.senderAccountName,
         transactions: transactions,
-        paidTotal: paidAmount + appliedCredit, 
-        remainingDebt: createdDebt, 
+        paidTotal: Math.min(totalDue, paidAmount + appliedCredit),
+        remainingDebt: Math.max(totalDue - (paidAmount + appliedCredit), 0),
         lastPaymentDate: paidAmount > 0 ? nowIso : undefined,
         excuse: checkoutData.excuse,
         timestamp: Date.now(),
@@ -881,9 +881,10 @@ const App: React.FC = () => {
 
           setRecords(prev => prev.map(r => {
               if (r.id !== recordId) return r;
-              const newPaidTotal = (r.paidTotal || 0) + amount;
-              const overpayCredit = Math.max(0, newPaidTotal - r.totalInvoice);
-              const remainingDebt = overpayCredit > 0 ? 0 : Math.max(r.totalInvoice - newPaidTotal, 0);
+              const newPaidTotalRaw = (r.paidTotal || 0) + amount;
+              const overpayCredit = Math.max(0, newPaidTotalRaw - r.totalInvoice);
+              const appliedPaidTotal = Math.min(newPaidTotalRaw, r.totalInvoice);
+              const remainingDebt = Math.max(r.totalInvoice - appliedPaidTotal, 0);
 
               const newTx: Transaction = { id: generateId(), date: new Date().toISOString(), amount, type, ...details, note: overpayCredit > 0 ? 'سداد فاتورة مع رصيد زائد' : 'سداد فاتورة' };
 
@@ -893,7 +894,7 @@ const App: React.FC = () => {
               return {
                   ...r,
                   transactions: [...(r.transactions||[]), newTx],
-                  paidTotal: newPaidTotal,
+                  paidTotal: appliedPaidTotal,
                   remainingDebt,
                   createdCredit: (r.createdCredit || 0) + overpayCredit,
                   isPaid: remainingDebt < 0.5,
@@ -992,12 +993,13 @@ const App: React.FC = () => {
             const ords = orderData.orderIdToEdit ? r.orders.map(o=>o.id===orderData.orderIdToEdit?newOrder:o) : [...r.orders, newOrder];
             const fins = calcRecordFinancials(r as any, r.endTime, pricingConfig, ords, r.discountApplied);
             const newTotal = fins.totalInvoice || 0;
-            const newRemaining = Math.max(0, newTotal - r.paidTotal);
             const creditDelta = Math.max(0, r.paidTotal - newTotal);
+            const adjustedPaidTotal = r.paidTotal - creditDelta;
+            const newRemaining = Math.max(0, newTotal - adjustedPaidTotal);
 
             syncCustomerBalance(r.customerPhone, newRemaining, creditDelta, r.customerName);
 
-            return { ...r, ...fins, orders: ords, totalInvoice: newTotal, remainingDebt: newRemaining, createdCredit: (r.createdCredit || 0) + creditDelta, paymentStatus: newRemaining < 0.5 ? 'paid' : 'customer_debt', isPaid: newRemaining < 0.5 };
+            return { ...r, ...fins, orders: ords, totalInvoice: newTotal, paidTotal: adjustedPaidTotal, remainingDebt: newRemaining, createdCredit: (r.createdCredit || 0) + creditDelta, paymentStatus: newRemaining < 0.5 ? 'paid' : 'customer_debt', isPaid: newRemaining < 0.5 };
         }));
     } else {
           setSessions(prev => prev.map(s => s.id===orderData.target!.id ? { ...s, orders: orderData.orderIdToEdit ? s.orders.map(o=>o.id===orderData.orderIdToEdit?newOrder:o) : [...s.orders, newOrder] } : s));
@@ -1025,8 +1027,9 @@ const App: React.FC = () => {
                 const updatedOrders = r.orders.filter(o => o.id !== orderId);
                 const financials = calcRecordFinancials(r as any, r.endTime, pricingConfig, updatedOrders, r.discountApplied);
                 const newTotal = financials.totalInvoice || 0;
-                const newRemaining = Math.max(0, newTotal - r.paidTotal);
                 const creditDelta = Math.max(0, r.paidTotal - newTotal);
+                const adjustedPaidTotal = r.paidTotal - creditDelta;
+                const newRemaining = Math.max(0, newTotal - adjustedPaidTotal);
 
                 syncCustomerBalance(r.customerPhone, newRemaining, creditDelta, r.customerName);
             return {
@@ -1034,6 +1037,7 @@ const App: React.FC = () => {
                 ...financials,
                 orders: updatedOrders,
                 totalInvoice: newTotal,
+                paidTotal: adjustedPaidTotal,
                 remainingDebt: newRemaining,
                 createdCredit: (r.createdCredit || 0) + creditDelta,
                 paymentStatus: newRemaining < 0.5 ? 'paid' : 'customer_debt',
